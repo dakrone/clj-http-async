@@ -2,7 +2,8 @@
   "Core HTTP request/response implementation."
   (:require [clojure.pprint]
             [clj-http.conn-mgr :as conn]
-            [clj-http.multipart :as mp])
+            ;;[clj-http.multipart :as mp]
+            )
   (:import (java.io ByteArrayOutputStream File FilterInputStream InputStream)
            (java.net URI)
            (org.apache.http HeaderIterator HttpRequest HttpEntity
@@ -20,6 +21,8 @@
            (org.apache.http.conn.routing HttpRoute)
            (org.apache.http.conn.params ConnRoutePNames)
            (org.apache.http.impl.client DefaultHttpClient)
+           (org.apache.http.impl.nio.client DefaultHttpAsyncClient)
+           (org.apache.http.nio.client HttpAsyncClient)
            (org.apache.http.impl.conn SingleClientConnManager
                                       ProxySelectorRoutePlanner)
            (org.apache.http.auth UsernamePasswordCredentials AuthScope)
@@ -41,7 +44,7 @@
                         (if tail values value))])))
        (into {})))
 
-(defn set-client-param [#^HttpClient client key val]
+(defn set-client-param [client key val]
   (when-not (nil? val)
     (-> client
         (.getParams)
@@ -65,13 +68,13 @@
 (defn- set-routing
   "Use ProxySelectorRoutePlanner to choose proxy sensible based on
   http.nonProxyHosts"
-  [^DefaultHttpClient client]
+  [client]
   (.setRoutePlanner client
                     (ProxySelectorRoutePlanner.
                      (.. client getConnectionManager getSchemeRegistry) nil))
   client)
 
-(defn maybe-force-proxy [^DefaultHttpClient client
+(defn maybe-force-proxy [client
                          ^HttpEntityEnclosingRequestBase request
                          proxy-host proxy-port]
   (let [uri (.getURI request)]
@@ -169,8 +172,10 @@
            client-params] :as req}]
   (let [^ClientConnectionManager conn-mgr
         (or conn/*connection-manager* (conn/make-regular-conn-manager req))
-        ^DefaultHttpClient http-client (set-routing
-                                        (DefaultHttpClient. conn-mgr))
+        ;; ^DefaultHttpClient http-client (set-routing
+        ;;                                 (DefaultHttpClient. conn-mgr))
+        http-client (doto (DefaultHttpAsyncClient.)
+                      (.start))
         scheme (name scheme)]
     (when-let [cookie-store (or cookie-store *cookie-store*)]
       (.setCookieStore http-client cookie-store))
@@ -212,43 +217,45 @@
         (.addHeader http-req "Connection" "close"))
       (doseq [[header-n header-v] headers]
         (.addHeader http-req header-n header-v))
-      (if multipart
-        (.setEntity #^HttpEntityEnclosingRequest http-req
-                    (mp/create-multipart-entity multipart))
-        (when (and body (instance? HttpEntityEnclosingRequest http-req))
-          (if (instance? HttpEntity body)
-            (.setEntity #^HttpEntityEnclosingRequest http-req body)
-            (.setEntity #^HttpEntityEnclosingRequest http-req
-                        (if (string? body)
-                          (StringEntity. body "UTF-8")
-                          (ByteArrayEntity. body))))))
+      #_(if multipart
+          (.setEntity #^HttpEntityEnclosingRequest http-req
+                      (mp/create-multipart-entity multipart))
+          (when (and body (instance? HttpEntityEnclosingRequest http-req))
+            (if (instance? HttpEntity body)
+              (.setEntity #^HttpEntityEnclosingRequest http-req body)
+              (.setEntity #^HttpEntityEnclosingRequest http-req
+                          (if (string? body)
+                            (StringEntity. body "UTF-8")
+                            (ByteArrayEntity. body))))))
       (when debug (print-debug! req http-req))
-      (let [http-resp (.execute http-client http-req)
-            http-entity (.getEntity http-resp)
-            resp {:status (.getStatusCode (.getStatusLine http-resp))
-                  :headers (parse-headers (.headerIterator http-resp))
-                  :body (coerce-body-entity req http-entity conn-mgr)}]
-        (when (and (instance? SingleClientConnManager conn-mgr)
-                   (not= :stream as))
-          (.shutdown ^ClientConnectionManager conn-mgr))
-        (if save-request?
-          (-> resp
-              (assoc :request req)
-              (assoc-in [:request :body-type] (type body))
-              (update-in [:request]
-                         #(if debug-body
-                            (assoc % :body-content
-                                   (cond
-                                    (isa? (type (:body %)) String)
-                                    (:body %)
+      (let [resp-future (.execute http-client http-req nil)
+            r (reify clojure.lang.IDeref
+                (deref [_]
+                  (let [http-resp (.get resp-future)
+                        _ (.shutdown http-client)
+                        http-entity (.getEntity http-resp)
+                        resp {:status (.getStatusCode (.getStatusLine http-resp))
+                              :headers (parse-headers (.headerIterator http-resp))
+                              :body (coerce-body-entity req http-entity conn-mgr)}]
+                    (if save-request?
+                      (-> resp
+                          (assoc :request req)
+                          (assoc-in [:request :body-type] (type body))
+                          (update-in [:request]
+                                     #(if debug-body
+                                        (assoc % :body-content
+                                               (cond
+                                                (isa? (type (:body %)) String)
+                                                (:body %)
 
-                                    (isa? (type (:body %)) HttpEntity)
-                                    (let [baos (ByteArrayOutputStream.)]
-                                      (.writeTo (:body %) baos)
-                                      (.toString baos "UTF-8"))
+                                                (isa? (type (:body %)) HttpEntity)
+                                                (let [baos (ByteArrayOutputStream.)]
+                                                  (.writeTo (:body %) baos)
+                                                  (.toString baos "UTF-8"))
 
-                                    :else nil))
-                            %))
-              (assoc-in [:request :http-req] http-req)
-              (dissoc :save-request?))
-          resp)))))
+                                                :else nil))
+                                        %))
+                          (assoc-in [:request :http-req] http-req)
+                          (dissoc :save-request?))
+                      resp))))]
+        r))))
