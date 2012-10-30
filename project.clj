@@ -1,6 +1,6 @@
-(defproject clj-http "0.5.7-SNAPSHOT"
-  :description "A Clojure HTTP library wrapping the Apache HttpComponents client."
-  :url "https://github.com/dakrone/clj-http/"
+(defproject clj-http-async "0.1.0-SNAPSHOT"
+  :description "A Clojure HTTP library wrapping the Apache HttpComponents async client."
+  :url "https://github.com/dakrone/clj-http-async/"
   :license {:name "The MIT License"
             :url "http://opensource.org/licenses/mit-license.php"
             :distribution :repo}
